@@ -1,0 +1,10 @@
+Flask==3.1.0
+Flask-SQLAlchemy==3.1.1
+APScheduler==3.10.4
+requests==2.32.3
+beautifulsoup4==4.12.3
+PyMuPDF==1.25.5
+python-dateutil==2.9.0.post0
+gunicorn==23.0.0
+pandas==2.2.3
+openpyxl==3.1.5

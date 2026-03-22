@@ -1,0 +1,22 @@
+{% extends "base.html" %}
+{% block content %}
+<div class="header">
+  <div>
+    <div class="title">Detalhes do Registro #{{ record.id }}</div>
+    <div class="subtitle">Extração completa do PDF associado.</div>
+  </div>
+  <div class="actions">
+    <a href="/"><button class="btn-soft" type="button">Voltar</button></a>
+    <a href="/pdf/{{ record.source_pdf_id }}" target="_blank"><button class="btn-primary" type="button">Abrir PDF</button></a>
+  </div>
+</div>
+
+<div class="detail-grid">
+  {% for key, value in record.raw_json.items() %}
+  <div class="field">
+    <strong>{{ key.replace('_', ' ').title() }}</strong>
+    <div>{{ value or '-' }}</div>
+  </div>
+  {% endfor %}
+</div>
+{% endblock %}

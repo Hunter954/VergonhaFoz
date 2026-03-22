@@ -1,0 +1,176 @@
+{% extends "base.html" %}
+{% block content %}
+<div class="header">
+  <div>
+    <div class="title">Coletor Sequencial de Imóveis</div>
+    <div class="subtitle">Varre os IDs do portal, pula os cadastros inexistentes, baixa os PDFs encontrados e extrai os campos em lista.</div>
+  </div>
+  <div class="actions">
+    <a href="/export.xlsx"><button type="button" class="btn-soft">Exportar XLSX</button></a>
+  </div>
+</div>
+
+<div class="cards" style="grid-template-columns: repeat(4, minmax(0, 1fr));">
+  <div class="card"><div class="stat-label">Registros extraídos</div><div class="stat-value">{{ stats.records }}</div></div>
+  <div class="card"><div class="stat-label">PDFs salvos</div><div class="stat-value">{{ stats.pdfs }}</div></div>
+  <div class="card"><div class="stat-label">IDs varridos</div><div class="stat-value">{{ stats.scanned }}</div></div>
+  <div class="card"><div class="stat-label">Último ID</div><div class="stat-value">{{ stats.last_sequence or '-' }}</div></div>
+</div>
+
+<div class="cards" style="grid-template-columns: repeat(4, minmax(0, 1fr));">
+  <div class="card"><div class="stat-label">Processados</div><div class="stat-value">{{ stats.processed }}</div></div>
+  <div class="card"><div class="stat-label">Sem cadastro</div><div class="stat-value">{{ stats.sem_cadastro }}</div></div>
+  <div class="card"><div class="stat-label">Sem PDF</div><div class="stat-value">{{ stats.pdf_nao_encontrado }}</div></div>
+  <div class="card"><div class="stat-label">Erros</div><div class="stat-value">{{ stats.erros }}</div></div>
+</div>
+
+<div class="panel" style="margin-bottom: 16px;">
+  <div style="font-weight: 800; margin-bottom: 10px;">Rodar varredura manual</div>
+  <form class="grid" method="post" action="/scan">
+    <input name="start_id" placeholder="ID inicial" value="{{ request.args.get('sequence_from','1') }}">
+    <input name="end_id" placeholder="ID final" value="{{ request.args.get('sequence_to','') }}">
+    <input name="batch_size" placeholder="Tamanho do lote" value="50">
+    <div class="muted" style="padding: 12px; border: 1px dashed var(--line); border-radius: 12px;">Use um intervalo curto para testar, por exemplo 1 até 100.</div>
+    <button class="btn-primary" type="submit">Executar varredura</button>
+    <div></div>
+  </form>
+</div>
+
+<div class="panel" style="margin-bottom: 16px;">
+  <div style="font-weight: 800; margin-bottom: 10px;">Filtros da lista extraída</div>
+  <form class="grid" method="get">
+    <input name="q" placeholder="Busca geral" value="{{ request.args.get('q','') }}">
+    <input name="nome" placeholder="Nome" value="{{ request.args.get('nome','') }}">
+    <input name="cpf" placeholder="CPF" value="{{ request.args.get('cpf','') }}">
+    <input name="inscricao_imobiliaria" placeholder="Inscrição imobiliária" value="{{ request.args.get('inscricao_imobiliaria','') }}">
+    <input name="endereco" placeholder="Endereço" value="{{ request.args.get('endereco','') }}">
+    <input name="bairro" placeholder="Bairro" value="{{ request.args.get('bairro','') }}">
+    <input name="cidade" placeholder="Cidade" value="{{ request.args.get('cidade','') }}">
+    <input name="cep" placeholder="CEP" value="{{ request.args.get('cep','') }}">
+    <input name="matricula" placeholder="Matrícula" value="{{ request.args.get('matricula','') }}">
+    <input name="tipo_lote" placeholder="Tipo de lote" value="{{ request.args.get('tipo_lote','') }}">
+    <input name="valor_venal_territorial" placeholder="Valor venal territorial" value="{{ request.args.get('valor_venal_territorial','') }}">
+    <input name="exercicio" placeholder="Exercício" value="{{ request.args.get('exercicio','') }}">
+    <input name="scan_status" placeholder="Status da varredura" value="{{ request.args.get('scan_status','') }}">
+    <button class="btn-primary" type="submit">Filtrar registros</button>
+    <a href="/"><button class="btn-soft" type="button">Limpar</button></a>
+  </form>
+</div>
+
+<div class="panel" style="margin-bottom: 16px;">
+  <div style="font-weight: 800; margin-bottom: 10px;">Lista extraída</div>
+  <div class="table-wrap">
+    <table>
+      <thead>
+        <tr>
+          <th>ID</th>
+          <th>Seq.</th>
+          <th>Status</th>
+          <th>Nome</th>
+          <th>CPF</th>
+          <th>RG</th>
+          <th>Inscrição</th>
+          <th>Endereço</th>
+          <th>Bairro</th>
+          <th>Cidade</th>
+          <th>CEP</th>
+          <th>Telefone</th>
+          <th>Valor Venal Territorial</th>
+          <th>Área do Lote</th>
+          <th>Tipo de Lote</th>
+          <th>Matrícula</th>
+          <th>Ações</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for record in records_pagination.items %}
+        {% set scan = record.source_pdf.property_scan if record.source_pdf else None %}
+        <tr>
+          <td>{{ record.id }}</td>
+          <td>{{ scan.sequence_id if scan else '-' }}</td>
+          <td><span class="badge">{{ scan.status if scan else 'sem_scan' }}</span></td>
+          <td>{{ record.nome or '-' }}</td>
+          <td>{{ record.cpf or '-' }}</td>
+          <td>{{ record.rg or '-' }}</td>
+          <td>{{ record.inscricao_imobiliaria or '-' }}</td>
+          <td>{{ record.endereco or '-' }}</td>
+          <td>{{ record.bairro or '-' }}</td>
+          <td>{{ record.cidade or '-' }}</td>
+          <td>{{ record.cep or '-' }}</td>
+          <td>{{ record.telefone_celular or record.telefone_residencial or '-' }}</td>
+          <td>{{ record.valor_venal_territorial or '-' }}</td>
+          <td>{{ record.area_lote or '-' }}</td>
+          <td>{{ record.tipo_lote or '-' }}</td>
+          <td>{{ record.matricula or '-' }}</td>
+          <td>
+            <a href="/record/{{ record.id }}">Detalhes</a><br>
+            <a href="/pdf/{{ record.source_pdf_id }}" target="_blank">PDF</a>
+          </td>
+        </tr>
+        {% else %}
+        <tr><td colspan="17" class="muted">Nenhum registro encontrado.</td></tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+  <div class="pagination">
+    <span class="badge">Página {{ records_pagination.page }} de {{ records_pagination.pages or 1 }}</span>
+    {% if records_pagination.has_prev %}<a href="{{ url_for('main.index', **request.args.to_dict(), record_page=records_pagination.prev_num) }}">Anterior</a>{% endif %}
+    {% if records_pagination.has_next %}<a href="{{ url_for('main.index', **request.args.to_dict(), record_page=records_pagination.next_num) }}">Próxima</a>{% endif %}
+  </div>
+</div>
+
+<div class="panel">
+  <div style="font-weight: 800; margin-bottom: 10px;">Log da varredura por ID</div>
+  <form class="grid" method="get" style="margin-bottom: 12px;">
+    <input name="sequence_from" placeholder="ID mínimo" value="{{ request.args.get('sequence_from','') }}">
+    <input name="sequence_to" placeholder="ID máximo" value="{{ request.args.get('sequence_to','') }}">
+    <input name="scan_status" placeholder="Status (processado, sem_cadastro, pdf_nao_encontrado, erro)" value="{{ request.args.get('scan_status','') }}">
+    <div></div><div></div>
+    <button class="btn-primary" type="submit">Filtrar log</button>
+  </form>
+  <div class="table-wrap">
+    <table>
+      <thead>
+        <tr>
+          <th>Seq.</th>
+          <th>Status</th>
+          <th>URL</th>
+          <th>PDF</th>
+          <th>Tentativas</th>
+          <th>HTTP</th>
+          <th>Última checagem</th>
+          <th>Mensagem</th>
+          <th>Ações</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for scan in scans_pagination.items %}
+        <tr>
+          <td>{{ scan.sequence_id }}</td>
+          <td><span class="badge">{{ scan.status }}</span></td>
+          <td>{{ scan.target_url }}</td>
+          <td>{% if scan.source_pdf_id %}<a href="/pdf/{{ scan.source_pdf_id }}" target="_blank">Abrir</a>{% else %}-{% endif %}</td>
+          <td>{{ scan.attempts }}</td>
+          <td>{{ scan.http_status or '-' }}</td>
+          <td>{{ scan.last_checked_at or '-' }}</td>
+          <td>{{ scan.error_message or '-' }}</td>
+          <td>
+            <form method="post" action="/scan/{{ scan.sequence_id }}/retry">
+              <button class="btn-soft" type="submit">Reprocessar</button>
+            </form>
+          </td>
+        </tr>
+        {% else %}
+        <tr><td colspan="9" class="muted">Nenhum ID varrido ainda.</td></tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+  <div class="pagination">
+    <span class="badge">Página {{ scans_pagination.page }} de {{ scans_pagination.pages or 1 }}</span>
+    {% if scans_pagination.has_prev %}<a href="{{ url_for('main.index', **request.args.to_dict(), scan_page=scans_pagination.prev_num) }}">Anterior</a>{% endif %}
+    {% if scans_pagination.has_next %}<a href="{{ url_for('main.index', **request.args.to_dict(), scan_page=scans_pagination.next_num) }}">Próxima</a>{% endif %}
+  </div>
+</div>
+{% endblock %}

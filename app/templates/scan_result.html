@@ -1,0 +1,11 @@
+{% extends "base.html" %}
+{% block content %}
+<div class="header">
+  <div>
+    <div class="title">Resultado da Varredura</div>
+    <div class="subtitle">Resumo da execução manual.</div>
+  </div>
+  <div class="actions"><a href="/"><button class="btn-soft" type="button">Voltar</button></a></div>
+</div>
+<div class="panel scan-box">{{ result | tojson(indent=2) }}</div>
+{% endblock %}

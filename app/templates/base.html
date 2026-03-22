@@ -1,0 +1,79 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Coletor de PDFs - Imóveis</title>
+  <style>
+    :root {
+      --bg: #0f172a;
+      --panel: #111827;
+      --line: #23304a;
+      --soft: #94a3b8;
+      --text: #e5e7eb;
+      --brand: #22c55e;
+      --brand-2: #38bdf8;
+      --danger: #f87171;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      font-family: Inter, Arial, sans-serif;
+      background: linear-gradient(180deg, #0b1220, var(--bg));
+      color: var(--text);
+    }
+    a { color: #7dd3fc; text-decoration: none; }
+    .container { max-width: 1480px; margin: 0 auto; padding: 24px; }
+    .header { display: flex; justify-content: space-between; align-items: center; gap: 16px; flex-wrap: wrap; margin-bottom: 20px; }
+    .title { font-size: 28px; font-weight: 800; }
+    .subtitle { color: var(--soft); font-size: 14px; }
+    .cards { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 16px; margin-bottom: 20px; }
+    .card, .panel {
+      background: rgba(17,24,39,.84);
+      border: 1px solid var(--line);
+      border-radius: 18px;
+      padding: 16px;
+      box-shadow: 0 18px 50px rgba(0,0,0,.2);
+      backdrop-filter: blur(8px);
+    }
+    .stat-label { font-size: 13px; color: var(--soft); }
+    .stat-value { font-size: 28px; font-weight: 800; margin-top: 4px; }
+    form.grid { display: grid; grid-template-columns: repeat(6, minmax(0, 1fr)); gap: 10px; align-items: start; }
+    input, button {
+      width: 100%; padding: 12px 14px; border-radius: 12px; border: 1px solid var(--line);
+      background: #0b1220; color: var(--text); outline: none;
+    }
+    button { cursor: pointer; font-weight: 700; }
+    .btn-primary { background: linear-gradient(135deg, #16a34a, #0ea5e9); border: 0; }
+    .btn-soft { background: #132035; }
+    .actions { display: flex; gap: 10px; flex-wrap: wrap; }
+    table { width: 100%; border-collapse: collapse; font-size: 13px; }
+    th, td { border-bottom: 1px solid var(--line); padding: 10px; text-align: left; vertical-align: top; }
+    th { position: sticky; top: 0; background: #0f172a; z-index: 1; }
+    .table-wrap { overflow: auto; max-height: 70vh; border-radius: 16px; }
+    .badge { display: inline-block; padding: 6px 10px; border-radius: 999px; background: rgba(34,197,94,.12); border: 1px solid rgba(34,197,94,.35); font-size: 12px; }
+    .muted { color: var(--soft); }
+    .pagination { display: flex; gap: 8px; margin-top: 16px; align-items: center; flex-wrap: wrap; }
+    .pagination a { padding: 10px 12px; background: #132035; border-radius: 10px; border: 1px solid var(--line); }
+    .detail-grid { display: grid; grid-template-columns: repeat(2, minmax(0,1fr)); gap: 10px; }
+    .field { padding: 12px; border: 1px solid var(--line); border-radius: 14px; background: #0b1220; }
+    .field strong { display: block; font-size: 12px; color: var(--soft); margin-bottom: 6px; }
+    .scan-box { white-space: pre-wrap; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 13px; }
+    @media (max-width: 1100px) {
+      form.grid { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+      .cards { grid-template-columns: 1fr; }
+    }
+    @media (max-width: 720px) {
+      form.grid { grid-template-columns: 1fr; }
+      .detail-grid { grid-template-columns: 1fr; }
+      .container { padding: 14px; }
+      .title { font-size: 22px; }
+    }
+  </style>
+</head>
+<body>
+  <div class="container">
+    {% block content %}{% endblock %}
+  </div>
+</body>
+</html>
