@@ -2,7 +2,7 @@ import io
 import os
 
 import pandas as pd
-from flask import Blueprint, abort, current_app, jsonify, render_template, request, send_file
+from flask import Blueprint, abort, current_app, jsonify, render_template, request, send_file, url_for
 from sqlalchemy import or_
 
 from .models import PropertyRecord, PropertyScan, SourcePdf
@@ -84,11 +84,32 @@ def index():
         "erros": PropertyScan.query.filter_by(status="erro").count(),
         "last_sequence": last_scan.sequence_id if last_scan else None,
     }
+        # URLs de paginação (Jinja não aceita **kwargs dentro de url_for)
+    base_args = request.args.to_dict(flat=True)
+
+    def _url_with(**overrides):
+        args = dict(base_args)
+        for k, v in overrides.items():
+            if v is None:
+                args.pop(k, None)
+            else:
+                args[k] = str(v)
+        return url_for('main.index', **args)
+
+    record_prev_url = _url_with(record_page=records_pagination.prev_num) if records_pagination.has_prev else None
+    record_next_url = _url_with(record_page=records_pagination.next_num) if records_pagination.has_next else None
+    scan_prev_url = _url_with(scan_page=scans_pagination.prev_num) if scans_pagination.has_prev else None
+    scan_next_url = _url_with(scan_page=scans_pagination.next_num) if scans_pagination.has_next else None
+
     return render_template(
         "index.html",
         records_pagination=records_pagination,
         scans_pagination=scans_pagination,
         stats=stats,
+        record_prev_url=record_prev_url,
+        record_next_url=record_next_url,
+        scan_prev_url=scan_prev_url,
+        scan_next_url=scan_next_url,
     )
 
 

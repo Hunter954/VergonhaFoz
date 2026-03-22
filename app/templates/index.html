@@ -115,8 +115,8 @@
   </div>
   <div class="pagination">
     <span class="badge">Página {{ records_pagination.page }} de {{ records_pagination.pages or 1 }}</span>
-    {% if records_pagination.has_prev %}<a href="{{ url_for('main.index', **request.args.to_dict(), record_page=records_pagination.prev_num) }}">Anterior</a>{% endif %}
-    {% if records_pagination.has_next %}<a href="{{ url_for('main.index', **request.args.to_dict(), record_page=records_pagination.next_num) }}">Próxima</a>{% endif %}
+    {% if record_prev_url %}<a href="{{ record_prev_url }}">Anterior</a>{% endif %}
+    {% if record_next_url %}<a href="{{ record_next_url }}">Próxima</a>{% endif %}
   </div>
 </div>
 
@@ -169,8 +169,8 @@
   </div>
   <div class="pagination">
     <span class="badge">Página {{ scans_pagination.page }} de {{ scans_pagination.pages or 1 }}</span>
-    {% if scans_pagination.has_prev %}<a href="{{ url_for('main.index', **request.args.to_dict(), scan_page=scans_pagination.prev_num) }}">Anterior</a>{% endif %}
-    {% if scans_pagination.has_next %}<a href="{{ url_for('main.index', **request.args.to_dict(), scan_page=scans_pagination.next_num) }}">Próxima</a>{% endif %}
+    {% if scan_prev_url %}<a href="{{ scan_prev_url }}">Anterior</a>{% endif %}
+    {% if scan_next_url %}<a href="{{ scan_next_url }}">Próxima</a>{% endif %}
   </div>
 </div>
 {% endblock %}
