@@ -68,3 +68,19 @@ class PropertyRecord(db.Model):
     updated_at = db.Column(db.DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False)
 
     source_pdf = db.relationship("SourcePdf", back_populates="property_record")
+
+
+class CrawlState(db.Model):
+    id = db.Column(db.Integer, primary_key=True)
+    start_id = db.Column(db.Integer, nullable=False, default=1)
+    end_id = db.Column(db.Integer, nullable=False, default=5000)
+    current_id = db.Column(db.Integer, nullable=False, default=1, index=True)
+    batch_size = db.Column(db.Integer, nullable=False, default=10)
+    is_running = db.Column(db.Boolean, nullable=False, default=False, index=True)
+    last_status = db.Column(db.String(40), nullable=True)
+    last_error = db.Column(db.Text, nullable=True)
+    processed_total = db.Column(db.Integer, nullable=False, default=0)
+    last_batch_started_at = db.Column(db.DateTime, nullable=True)
+    last_batch_finished_at = db.Column(db.DateTime, nullable=True)
+    created_at = db.Column(db.DateTime, default=datetime.utcnow, nullable=False)
+    updated_at = db.Column(db.DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False)
