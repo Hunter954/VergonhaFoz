@@ -3,7 +3,6 @@ import hashlib
 import json
 import os
 import re
-import time
 import subprocess
 from collections import deque
 from datetime import datetime
@@ -12,6 +11,7 @@ from urllib.parse import urljoin, urlparse
 import requests
 from bs4 import BeautifulSoup
 from flask import current_app
+from sqlalchemy.exc import IntegrityError
 
 from .extensions import db
 from .models import PropertyRecord, PropertyScan, SourcePdf
@@ -28,14 +28,9 @@ except Exception:
 
 
 def _maybe_install_playwright_chromium(reason: str | None = None):
-    """Instala o Chromium do Playwright em runtime (útil quando o build não persistiu o cache).
-
-    A ideia é usar PLAYWRIGHT_BROWSERS_PATH apontando para um diretório persistente (ex.: /data/ms-playwright).
-    """
     if not current_app.config.get("AUTO_INSTALL_PLAYWRIGHT_BROWSERS", True):
         return
     try:
-        # evita rodar install sempre
         marker = os.path.join(current_app.config.get("DATA_DIR", "/data"), ".playwright_chromium_installed")
         if os.path.exists(marker):
             return
@@ -43,7 +38,6 @@ def _maybe_install_playwright_chromium(reason: str | None = None):
         with open(marker, "w") as f:
             f.write(str(reason or "installed"))
     except Exception:
-        # se falhar, deixa o erro original aparecer no log
         return
 
 
@@ -204,17 +198,45 @@ def fetch_target_page(url: str):
 
 def save_pdf_bytes(content: bytes, source_url: str, referer_url: str | None = None, status: str = "baixado"):
     digest = sha256_of_bytes(content)
-    existing = SourcePdf.query.filter_by(sha256=digest).first()
-    if existing:
-        if referer_url and not existing.page_url:
-            existing.page_url = referer_url
-            db.session.commit()
-        return existing, False
-
     filename = f"{digest}.pdf"
     file_path = os.path.join(current_app.config["PDF_STORAGE_DIR"], filename)
-    with open(file_path, "wb") as f:
-        f.write(content)
+
+    os.makedirs(current_app.config["PDF_STORAGE_DIR"], exist_ok=True)
+    if not os.path.exists(file_path):
+        with open(file_path, "wb") as f:
+            f.write(content)
+
+    # 1) prioridade: mesma source_url já existe -> atualiza
+    existing_by_url = SourcePdf.query.filter_by(source_url=source_url).first()
+    if existing_by_url:
+        existing_by_url.page_url = referer_url or existing_by_url.page_url
+        existing_by_url.file_path = file_path
+        existing_by_url.sha256 = digest
+        existing_by_url.file_size = len(content)
+        existing_by_url.status = status
+        try:
+            db.session.commit()
+        except Exception:
+            db.session.rollback()
+            raise
+        return existing_by_url, False
+
+    # 2) fallback: mesmo arquivo já existe por hash -> reaproveita
+    existing_by_sha = SourcePdf.query.filter_by(sha256=digest).first()
+    if existing_by_sha:
+        if referer_url and not existing_by_sha.page_url:
+            existing_by_sha.page_url = referer_url
+        if source_url and not existing_by_sha.source_url:
+            existing_by_sha.source_url = source_url
+        existing_by_sha.file_path = file_path
+        existing_by_sha.file_size = len(content)
+        existing_by_sha.status = status
+        try:
+            db.session.commit()
+        except Exception:
+            db.session.rollback()
+            raise
+        return existing_by_sha, False
 
     source = SourcePdf(
         source_url=source_url,
@@ -225,8 +247,37 @@ def save_pdf_bytes(content: bytes, source_url: str, referer_url: str | None = No
         status=status,
     )
     db.session.add(source)
-    db.session.commit()
-    return source, True
+
+    try:
+        db.session.commit()
+        return source, True
+    except IntegrityError:
+        db.session.rollback()
+
+        # condição de corrida ou registro já inserido antes
+        existing_by_url = SourcePdf.query.filter_by(source_url=source_url).first()
+        if existing_by_url:
+            existing_by_url.page_url = referer_url or existing_by_url.page_url
+            existing_by_url.file_path = file_path
+            existing_by_url.sha256 = digest
+            existing_by_url.file_size = len(content)
+            existing_by_url.status = status
+            db.session.commit()
+            return existing_by_url, False
+
+        existing_by_sha = SourcePdf.query.filter_by(sha256=digest).first()
+        if existing_by_sha:
+            if referer_url and not existing_by_sha.page_url:
+                existing_by_sha.page_url = referer_url
+            if source_url and not existing_by_sha.source_url:
+                existing_by_sha.source_url = source_url
+            existing_by_sha.file_path = file_path
+            existing_by_sha.file_size = len(content)
+            existing_by_sha.status = status
+            db.session.commit()
+            return existing_by_sha, False
+
+        raise
 
 
 def download_pdf(source_url: str, referer_url: str | None = None):
@@ -255,7 +306,13 @@ def process_pdf(source: SourcePdf):
 
     source.last_processed_at = db.func.now()
     source.status = "processado"
-    db.session.commit()
+
+    try:
+        db.session.commit()
+    except Exception:
+        db.session.rollback()
+        raise
+
     return record
 
 
@@ -265,7 +322,11 @@ def get_or_create_scan(sequence_id: int, target_url: str) -> PropertyScan:
         return scan
     scan = PropertyScan(sequence_id=sequence_id, target_url=target_url, status="pendente")
     db.session.add(scan)
-    db.session.commit()
+    try:
+        db.session.commit()
+    except Exception:
+        db.session.rollback()
+        raise
     return scan
 
 
@@ -273,7 +334,11 @@ def update_scan(scan: PropertyScan, **kwargs):
     for key, value in kwargs.items():
         setattr(scan, key, value)
     scan.updated_at = datetime.utcnow()
-    db.session.commit()
+    try:
+        db.session.commit()
+    except Exception:
+        db.session.rollback()
+        raise
     return scan
 
 
@@ -347,8 +412,6 @@ def _extract_blob_from_page(page):
     return None, None
 
 
-
-
 def _iter_pages(context, page, popup=None):
     seen = []
     for candidate in [popup, page] + list(context.pages):
@@ -392,14 +455,13 @@ def _find_print_candidates(page):
                 try:
                     if item.is_visible(timeout=800):
                         box = item.bounding_box() or {}
-                        candidates.append((item, selector, box.get('x', 0), box.get('y', 0)))
+                        candidates.append((item, selector, box.get("x", 0), box.get("y", 0)))
                 except Exception:
                     continue
         except Exception:
             continue
-    # Prefer icons more to the right and upper in the card, which matches the print button in the screenshot.
     candidates.sort(key=lambda x: (-x[2], x[3]))
-    return [(a,b) for a,b,_,_ in candidates]
+    return [(a, b) for a, b, _, _ in candidates]
 
 
 def _extract_blob_from_frame(frame):
@@ -455,7 +517,7 @@ def _click_best_effort(locator, timeout_ms):
             return True
         except Exception:
             try:
-                locator.dispatch_event('click')
+                locator.dispatch_event("click")
                 return True
             except Exception:
                 return False
@@ -467,16 +529,16 @@ def _build_network_pdf_collector(context):
     def on_response(response):
         try:
             headers = {k.lower(): v for k, v in response.headers.items()}
-            ctype = (headers.get('content-type') or '').lower()
-            url = response.url or ''
-            if 'application/pdf' in ctype or '.pdf' in url.lower() or any(x in url.lower() for x in ['relatorio', 'espelho', 'imprimir', 'download']):
+            ctype = (headers.get("content-type") or "").lower()
+            url = response.url or ""
+            if "application/pdf" in ctype or ".pdf" in url.lower() or any(x in url.lower() for x in ["relatorio", "espelho", "imprimir", "download"]):
                 body = response.body()
-                if body and body.startswith(b'%PDF'):
+                if body and body.startswith(b"%PDF"):
                     bucket.append((url, body))
         except Exception:
             pass
 
-    context.on('response', on_response)
+    context.on("response", on_response)
     return bucket
 
 
@@ -504,6 +566,7 @@ def _capture_pdf_via_playwright(target_url: str):
                 )
             else:
                 raise
+
         context = browser.new_context(
             accept_downloads=True,
             user_agent=current_app.config["USER_AGENT"],
@@ -536,7 +599,7 @@ def _capture_pdf_via_playwright(target_url: str):
                     with context.expect_page(timeout=2500) as popup_info:
                         ok = _click_best_effort(print_locator, timeout_ms)
                         if not ok:
-                            raise RuntimeError('Falha ao clicar no botão de imprimir')
+                            raise RuntimeError("Falha ao clicar no botão de imprimir")
                     popup = popup_info.value
                     try:
                         popup.wait_for_load_state("domcontentloaded", timeout=timeout_ms)
@@ -545,7 +608,7 @@ def _capture_pdf_via_playwright(target_url: str):
                 except Exception:
                     ok = _click_best_effort(print_locator, timeout_ms)
                     if not ok:
-                        raise RuntimeError('Falha ao clicar no botão de imprimir')
+                        raise RuntimeError("Falha ao clicar no botão de imprimir")
                     page.wait_for_timeout(wait_after_print_ms)
 
                 active_pages = _iter_pages(context, page, popup)
@@ -556,12 +619,11 @@ def _capture_pdf_via_playwright(target_url: str):
                     except Exception:
                         pass
 
-                all_text = ' '.join(_page_text(ap) for ap in active_pages)
+                all_text = " ".join(_page_text(ap) for ap in active_pages)
                 if page_indicates_no_cadastro(all_text):
                     browser.close()
                     return {"status": "sem_cadastro", "message": "Não foi possível carregar os dados do cadastro."}
 
-                # 1) PDF capturado pela rede antes mesmo de aparecer o blob.
                 if network_pdfs:
                     url, body = network_pdfs[-1]
                     browser.close()
@@ -572,7 +634,6 @@ def _capture_pdf_via_playwright(target_url: str):
                         "capture_method": f"playwright_network:{print_selector}",
                     }
 
-                # 2) Blob já disponível em qualquer frame/página.
                 pdf_bytes, pdf_blob_url = _extract_any_blob(context, page, popup)
                 if pdf_bytes and pdf_bytes.startswith(b"%PDF"):
                     browser.close()
@@ -583,14 +644,13 @@ def _capture_pdf_via_playwright(target_url: str):
                         "capture_method": f"playwright_blob:{print_selector}",
                     }
 
-                # 3) Procurar botão Baixar em qualquer frame/modal/popup.
                 found_pg, found_frame, download_locator, download_selector = _first_visible_in_frames(context, page, popup, DOWNLOAD_SELECTORS)
                 if download_locator:
                     try:
                         with found_pg.expect_download(timeout=timeout_ms) as download_info:
                             ok = _click_best_effort(download_locator, timeout_ms)
                             if not ok:
-                                raise RuntimeError('Falha ao clicar no botão Baixar')
+                                raise RuntimeError("Falha ao clicar no botão Baixar")
                         download = download_info.value
                         tmp_path = download.path()
                         if tmp_path and os.path.exists(tmp_path):
@@ -604,7 +664,6 @@ def _capture_pdf_via_playwright(target_url: str):
                                 "capture_method": f"playwright_download:{download_selector}",
                             }
                     except Exception:
-                        # após o clique, tentar blob e rede novamente
                         try:
                             found_pg.wait_for_timeout(1800)
                         except Exception:
@@ -644,7 +703,12 @@ def process_sequence_id(sequence_id: int):
     scan = get_or_create_scan(sequence_id, target_url)
     scan.attempts += 1
     scan.last_checked_at = datetime.utcnow()
-    db.session.commit()
+
+    try:
+        db.session.commit()
+    except Exception:
+        db.session.rollback()
+        raise
 
     try:
         page = fetch_target_page(target_url)
@@ -667,7 +731,11 @@ def process_sequence_id(sequence_id: int):
             scan.pdf_url = pdf_url
             scan.source_pdf_id = source.id
             source.property_scan = scan
-            db.session.commit()
+            try:
+                db.session.commit()
+            except Exception:
+                db.session.rollback()
+                raise
 
             process_pdf(source)
             update_scan(
@@ -698,7 +766,13 @@ def process_sequence_id(sequence_id: int):
             scan.pdf_url = pw.get("pdf_url")
             scan.source_pdf_id = source.id
             source.property_scan = scan
-            db.session.commit()
+
+            try:
+                db.session.commit()
+            except Exception:
+                db.session.rollback()
+                raise
+
             process_pdf(source)
             update_scan(scan, status="processado", no_cadastro_detected=False, error_message=None)
             return {
@@ -715,8 +789,13 @@ def process_sequence_id(sequence_id: int):
             error_message="Página carregou, mas nenhum PDF foi localizado.",
         )
         return {"sequence_id": sequence_id, "status": "pdf_nao_encontrado"}
+
     except Exception as exc:
-        update_scan(scan, status="erro", error_message=str(exc))
+        db.session.rollback()
+        try:
+            update_scan(scan, status="erro", error_message=str(exc))
+        except Exception:
+            db.session.rollback()
         return {"sequence_id": sequence_id, "status": "erro", "error": str(exc)}
 
 
