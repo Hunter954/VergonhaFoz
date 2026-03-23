@@ -4,6 +4,7 @@ import json
 import os
 import re
 import time
+import subprocess
 from collections import deque
 from datetime import datetime
 from urllib.parse import urljoin, urlparse
@@ -24,6 +25,26 @@ except Exception:
     sync_playwright = None
     PlaywrightTimeoutError = Exception
     PLAYWRIGHT_AVAILABLE = False
+
+
+def _maybe_install_playwright_chromium(reason: str | None = None):
+    """Instala o Chromium do Playwright em runtime (útil quando o build não persistiu o cache).
+
+    A ideia é usar PLAYWRIGHT_BROWSERS_PATH apontando para um diretório persistente (ex.: /data/ms-playwright).
+    """
+    if not current_app.config.get("AUTO_INSTALL_PLAYWRIGHT_BROWSERS", True):
+        return
+    try:
+        # evita rodar install sempre
+        marker = os.path.join(current_app.config.get("DATA_DIR", "/data"), ".playwright_chromium_installed")
+        if os.path.exists(marker):
+            return
+        subprocess.run(["playwright", "install", "chromium"], check=True)
+        with open(marker, "w") as f:
+            f.write(str(reason or "installed"))
+    except Exception:
+        # se falhar, deixa o erro original aparecer no log
+        return
 
 
 PDF_PATTERNS = [
@@ -468,10 +489,21 @@ def _capture_pdf_via_playwright(target_url: str):
     use_headless = current_app.config["PLAYWRIGHT_HEADLESS"]
 
     with sync_playwright() as p:
-        browser = p.chromium.launch(
-            headless=use_headless,
-            args=["--no-sandbox", "--disable-dev-shm-usage", "--disable-gpu"],
-        )
+        try:
+            browser = p.chromium.launch(
+                headless=use_headless,
+                args=["--no-sandbox", "--disable-dev-shm-usage", "--disable-gpu"],
+            )
+        except Exception as exc:
+            msg = str(exc)
+            if "Executable doesn" in msg or "playwright install" in msg or "Executable doesn't exist" in msg:
+                _maybe_install_playwright_chromium(reason=msg[:200])
+                browser = p.chromium.launch(
+                    headless=use_headless,
+                    args=["--no-sandbox", "--disable-dev-shm-usage", "--disable-gpu"],
+                )
+            else:
+                raise
         context = browser.new_context(
             accept_downloads=True,
             user_agent=current_app.config["USER_AGENT"],

@@ -38,6 +38,9 @@ def create_app():
     app.config["PLAYWRIGHT_HEADLESS"] = os.getenv("PLAYWRIGHT_HEADLESS", "true").lower() == "true"
     app.config["PLAYWRIGHT_TIMEOUT_MS"] = int(os.getenv("PLAYWRIGHT_TIMEOUT_MS", "30000"))
     app.config["PLAYWRIGHT_WAIT_AFTER_PRINT_MS"] = int(os.getenv("PLAYWRIGHT_WAIT_AFTER_PRINT_MS", "2500"))
+    app.config["AUTO_INSTALL_PLAYWRIGHT_BROWSERS"] = os.getenv("AUTO_INSTALL_PLAYWRIGHT_BROWSERS", "true").lower() == "true"
+    # Sugestão: aponte PLAYWRIGHT_BROWSERS_PATH para um lugar persistente (ex.: /data/ms-playwright)
+    os.environ.setdefault("PLAYWRIGHT_BROWSERS_PATH", os.getenv("PLAYWRIGHT_BROWSERS_PATH", os.path.join(data_dir, "ms-playwright")))
     app.config["USER_AGENT"] = os.getenv(
         "USER_AGENT",
         "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123 Safari/537.36",
