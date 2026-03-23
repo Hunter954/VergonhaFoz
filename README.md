@@ -37,3 +37,21 @@ User-Agent:
 4) se não achar: Playwright → clica impressora → captura PDF por rede/blob/download
 5) salva o PDF em `/data/pdfs`
 6) extrai campos e salva no banco
+
+
+## Persistência recomendada
+
+- PDFs: use um volume montado em `/data`
+- Banco: use `DATABASE_URL` do Postgres no Railway
+
+### Variáveis importantes
+
+```
+DATA_DIR=/data
+DATABASE_URL=postgresql://...
+PLAYWRIGHT_ENABLED=true
+PLAYWRIGHT_HEADLESS=true
+SEQUENTIAL_URL_TEMPLATE=https://governodigital.foz.pr.gov.br/governo-digital/contribuinte/imoveis/1/{id}?aba=debitos
+```
+
+Observação: se `DATABASE_URL` não existir, o app faz fallback para SQLite em `/data/app.db`.

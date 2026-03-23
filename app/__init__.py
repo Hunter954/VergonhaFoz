@@ -5,6 +5,19 @@ from .routes import bp
 from .scheduler import init_scheduler
 
 
+def _get_database_uri(data_dir: str) -> str:
+    default_sqlite = f"sqlite:///{os.path.join(data_dir, 'app.db')}"
+    database_url = (os.getenv("DATABASE_URL") or os.getenv("SQLALCHEMY_DATABASE_URI") or "").strip()
+
+    if not database_url:
+        return default_sqlite
+
+    if database_url.startswith("postgres://"):
+        database_url = database_url.replace("postgres://", "postgresql://", 1)
+
+    return database_url
+
+
 def create_app():
     app = Flask(__name__)
 
@@ -12,11 +25,18 @@ def create_app():
     os.makedirs(data_dir, exist_ok=True)
     os.makedirs(os.path.join(data_dir, "pdfs"), exist_ok=True)
 
+    database_uri = _get_database_uri(data_dir)
+
     app.config["SECRET_KEY"] = os.getenv("SECRET_KEY", "dev-secret-change-me")
-    app.config["SQLALCHEMY_DATABASE_URI"] = os.getenv(
-        "DATABASE_URL", f"sqlite:///{os.path.join(data_dir, 'app.db')}"
-    )
+    app.config["SQLALCHEMY_DATABASE_URI"] = database_uri
     app.config["SQLALCHEMY_TRACK_MODIFICATIONS"] = False
+
+    if database_uri.startswith("postgresql://"):
+        app.config["SQLALCHEMY_ENGINE_OPTIONS"] = {
+            "pool_pre_ping": True,
+            "pool_recycle": 1800,
+        }
+
     app.config["DATA_DIR"] = data_dir
     app.config["PDF_STORAGE_DIR"] = os.path.join(data_dir, "pdfs")
     app.config["SCAN_URL"] = os.getenv(
@@ -39,7 +59,6 @@ def create_app():
     app.config["PLAYWRIGHT_TIMEOUT_MS"] = int(os.getenv("PLAYWRIGHT_TIMEOUT_MS", "30000"))
     app.config["PLAYWRIGHT_WAIT_AFTER_PRINT_MS"] = int(os.getenv("PLAYWRIGHT_WAIT_AFTER_PRINT_MS", "2500"))
     app.config["AUTO_INSTALL_PLAYWRIGHT_BROWSERS"] = os.getenv("AUTO_INSTALL_PLAYWRIGHT_BROWSERS", "true").lower() == "true"
-    # Sugestão: aponte PLAYWRIGHT_BROWSERS_PATH para um lugar persistente (ex.: /data/ms-playwright)
     os.environ.setdefault("PLAYWRIGHT_BROWSERS_PATH", os.getenv("PLAYWRIGHT_BROWSERS_PATH", os.path.join(data_dir, "ms-playwright")))
     app.config["USER_AGENT"] = os.getenv(
         "USER_AGENT",
