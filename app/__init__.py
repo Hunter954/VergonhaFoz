@@ -12,8 +12,12 @@ def _get_database_uri(data_dir: str) -> str:
     if not database_url:
         return default_sqlite
 
+    # Railway/alguns providers podem entregar postgres://
     if database_url.startswith("postgres://"):
-        database_url = database_url.replace("postgres://", "postgresql://", 1)
+        database_url = database_url.replace("postgres://", "postgresql+psycopg://", 1)
+    # Se vier sem driver explícito, força psycopg v3
+    elif database_url.startswith("postgresql://") and not database_url.startswith("postgresql+"):
+        database_url = database_url.replace("postgresql://", "postgresql+psycopg://", 1)
 
     return database_url
 
@@ -31,7 +35,7 @@ def create_app():
     app.config["SQLALCHEMY_DATABASE_URI"] = database_uri
     app.config["SQLALCHEMY_TRACK_MODIFICATIONS"] = False
 
-    if database_uri.startswith("postgresql://"):
+    if database_uri.startswith("postgresql+psycopg://") or database_uri.startswith("postgresql://"):
         app.config["SQLALCHEMY_ENGINE_OPTIONS"] = {
             "pool_pre_ping": True,
             "pool_recycle": 1800,
@@ -58,8 +62,13 @@ def create_app():
     app.config["PLAYWRIGHT_HEADLESS"] = os.getenv("PLAYWRIGHT_HEADLESS", "true").lower() == "true"
     app.config["PLAYWRIGHT_TIMEOUT_MS"] = int(os.getenv("PLAYWRIGHT_TIMEOUT_MS", "30000"))
     app.config["PLAYWRIGHT_WAIT_AFTER_PRINT_MS"] = int(os.getenv("PLAYWRIGHT_WAIT_AFTER_PRINT_MS", "2500"))
-    app.config["AUTO_INSTALL_PLAYWRIGHT_BROWSERS"] = os.getenv("AUTO_INSTALL_PLAYWRIGHT_BROWSERS", "true").lower() == "true"
-    os.environ.setdefault("PLAYWRIGHT_BROWSERS_PATH", os.getenv("PLAYWRIGHT_BROWSERS_PATH", os.path.join(data_dir, "ms-playwright")))
+    app.config["AUTO_INSTALL_PLAYWRIGHT_BROWSERS"] = (
+        os.getenv("AUTO_INSTALL_PLAYWRIGHT_BROWSERS", "true").lower() == "true"
+    )
+    os.environ.setdefault(
+        "PLAYWRIGHT_BROWSERS_PATH",
+        os.getenv("PLAYWRIGHT_BROWSERS_PATH", os.path.join(data_dir, "ms-playwright")),
+    )
     app.config["USER_AGENT"] = os.getenv(
         "USER_AGENT",
         "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123 Safari/537.36",
