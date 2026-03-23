@@ -41,9 +41,14 @@ NO_CADASTRO_PATTERNS = [
 PRINT_SELECTORS = [
     "i.fa-print",
     "i.fas.fa-print",
+    "i.fas.ng-star-inserted.fa-print",
+    "button i.fa-print",
+    "a i.fa-print",
     "[title*='imprim' i]",
     "button[title*='imprim' i]",
     "a[title*='imprim' i]",
+    "button:has(i.fa-print)",
+    "a:has(i.fa-print)",
     "text=Imprimir",
 ]
 
@@ -321,6 +326,139 @@ def _extract_blob_from_page(page):
     return None, None
 
 
+
+
+def _iter_pages(context, page, popup=None):
+    seen = []
+    for candidate in [popup, page] + list(context.pages):
+        if candidate and candidate not in seen:
+            seen.append(candidate)
+    return seen
+
+
+def _iter_frames(context, page, popup=None):
+    for pg in _iter_pages(context, page, popup):
+        for frame in pg.frames:
+            yield pg, frame
+
+
+def _first_visible_in_frames(context, page, popup, selectors):
+    for pg, frame in _iter_frames(context, page, popup):
+        for selector in selectors:
+            try:
+                locator = frame.locator(selector)
+                count = locator.count()
+                for idx in range(min(count, 5)):
+                    item = locator.nth(idx)
+                    try:
+                        if item.is_visible(timeout=800):
+                            return pg, frame, item, selector
+                    except Exception:
+                        continue
+            except Exception:
+                continue
+    return None, None, None, None
+
+
+def _find_print_candidates(page):
+    candidates = []
+    for selector in PRINT_SELECTORS:
+        try:
+            locator = page.locator(selector)
+            count = locator.count()
+            for idx in range(min(count, 8)):
+                item = locator.nth(idx)
+                try:
+                    if item.is_visible(timeout=800):
+                        box = item.bounding_box() or {}
+                        candidates.append((item, selector, box.get('x', 0), box.get('y', 0)))
+                except Exception:
+                    continue
+        except Exception:
+            continue
+    # Prefer icons more to the right and upper in the card, which matches the print button in the screenshot.
+    candidates.sort(key=lambda x: (-x[2], x[3]))
+    return [(a,b) for a,b,_,_ in candidates]
+
+
+def _extract_blob_from_frame(frame):
+    js = """async () => {
+        const candidates = [];
+        const pushIfBlob = (v) => { if (v && typeof v === 'string' && v.startsWith('blob:')) candidates.push(v); };
+        document.querySelectorAll('a, iframe, embed, object').forEach(el => {
+          pushIfBlob(el.href);
+          pushIfBlob(el.src);
+          pushIfBlob(el.data);
+        });
+        if (window.location.href && window.location.href.startsWith('blob:')) candidates.unshift(window.location.href);
+        if (!candidates.length) return null;
+        for (const url of candidates) {
+          try {
+            const res = await fetch(url);
+            const buf = await res.arrayBuffer();
+            let binary = '';
+            const bytes = new Uint8Array(buf);
+            const chunk = 0x8000;
+            for (let i = 0; i < bytes.length; i += chunk) {
+              binary += String.fromCharCode(...bytes.subarray(i, i + chunk));
+            }
+            return { url, b64: btoa(binary) };
+          } catch (e) {}
+        }
+        return null;
+    }"""
+    try:
+        result = frame.evaluate(js)
+        if result and result.get("b64"):
+            return base64.b64decode(result["b64"]), result.get("url")
+    except Exception:
+        pass
+    return None, None
+
+
+def _extract_any_blob(context, page, popup=None):
+    for _pg, frame in _iter_frames(context, page, popup):
+        pdf_bytes, blob_url = _extract_blob_from_frame(frame)
+        if pdf_bytes and pdf_bytes.startswith(b"%PDF"):
+            return pdf_bytes, blob_url
+    return None, None
+
+
+def _click_best_effort(locator, timeout_ms):
+    try:
+        locator.click(timeout=timeout_ms)
+        return True
+    except Exception:
+        try:
+            locator.click(timeout=timeout_ms, force=True)
+            return True
+        except Exception:
+            try:
+                locator.dispatch_event('click')
+                return True
+            except Exception:
+                return False
+
+
+def _build_network_pdf_collector(context):
+    bucket = []
+
+    def on_response(response):
+        try:
+            headers = {k.lower(): v for k, v in response.headers.items()}
+            ctype = (headers.get('content-type') or '').lower()
+            url = response.url or ''
+            if 'application/pdf' in ctype or '.pdf' in url.lower() or any(x in url.lower() for x in ['relatorio', 'espelho', 'imprimir', 'download']):
+                body = response.body()
+                if body and body.startswith(b'%PDF'):
+                    bucket.append((url, body))
+        except Exception:
+            pass
+
+    context.on('response', on_response)
+    return bucket
+
+
 def _capture_pdf_via_playwright(target_url: str):
     if not PLAYWRIGHT_AVAILABLE:
         raise RuntimeError("Playwright não está instalado na aplicação.")
@@ -340,91 +478,133 @@ def _capture_pdf_via_playwright(target_url: str):
             locale="pt-BR",
             viewport={"width": 1440, "height": 1100},
         )
+        network_pdfs = _build_network_pdf_collector(context)
         page = context.new_page()
         page.goto(target_url, wait_until="domcontentloaded", timeout=timeout_ms)
-        page.wait_for_load_state("networkidle", timeout=timeout_ms)
+        try:
+            page.wait_for_load_state("networkidle", timeout=timeout_ms)
+        except Exception:
+            pass
 
         body_text = _page_text(page)
         if page_indicates_no_cadastro(body_text):
             browser.close()
             return {"status": "sem_cadastro", "message": "Não foi possível carregar os dados do cadastro."}
 
-        print_locator, print_selector = _find_first(page, PRINT_SELECTORS)
-        if not print_locator:
+        popup = None
+        last_error = None
+        print_candidates = _find_print_candidates(page)
+        if not print_candidates:
             browser.close()
             raise RuntimeError("Ícone/botão de impressão não encontrado na página.")
 
-        popup = None
-        try:
-            with context.expect_page(timeout=3000) as popup_info:
-                print_locator.click(timeout=timeout_ms)
-            popup = popup_info.value
-            popup.wait_for_load_state("domcontentloaded", timeout=timeout_ms)
-        except Exception:
-            print_locator.click(timeout=timeout_ms)
-            page.wait_for_timeout(wait_after_print_ms)
-
-        active_page = popup or page
-        try:
-            active_page.wait_for_load_state("networkidle", timeout=min(timeout_ms, 10000))
-        except Exception:
-            pass
-        active_page.wait_for_timeout(wait_after_print_ms)
-
-        no_cadastro_text = _page_text(active_page)
-        if page_indicates_no_cadastro(no_cadastro_text):
-            browser.close()
-            return {"status": "sem_cadastro", "message": "Não foi possível carregar os dados do cadastro."}
-
-        pdf_bytes, pdf_blob_url = _extract_blob_from_page(active_page)
-        if pdf_bytes and pdf_bytes.startswith(b"%PDF"):
-            browser.close()
-            return {
-                "status": "processado",
-                "pdf_bytes": pdf_bytes,
-                "pdf_url": pdf_blob_url or active_page.url,
-                "capture_method": f"playwright_blob:{print_selector}",
-            }
-
-        download_locator, download_selector = _find_first(active_page, DOWNLOAD_SELECTORS)
-        if download_locator:
+        for print_locator, print_selector in print_candidates[:5]:
             try:
-                with active_page.expect_download(timeout=timeout_ms) as download_info:
-                    download_locator.click(timeout=timeout_ms)
-                download = download_info.value
-                tmp_path = download.path()
-                if tmp_path and os.path.exists(tmp_path):
-                    with open(tmp_path, "rb") as f:
-                        pdf_bytes = f.read()
+                try:
+                    with context.expect_page(timeout=2500) as popup_info:
+                        ok = _click_best_effort(print_locator, timeout_ms)
+                        if not ok:
+                            raise RuntimeError('Falha ao clicar no botão de imprimir')
+                    popup = popup_info.value
+                    try:
+                        popup.wait_for_load_state("domcontentloaded", timeout=timeout_ms)
+                    except Exception:
+                        pass
+                except Exception:
+                    ok = _click_best_effort(print_locator, timeout_ms)
+                    if not ok:
+                        raise RuntimeError('Falha ao clicar no botão de imprimir')
+                    page.wait_for_timeout(wait_after_print_ms)
+
+                active_pages = _iter_pages(context, page, popup)
+                for ap in active_pages:
+                    try:
+                        ap.wait_for_timeout(wait_after_print_ms)
+                        ap.wait_for_load_state("networkidle", timeout=min(timeout_ms, 8000))
+                    except Exception:
+                        pass
+
+                all_text = ' '.join(_page_text(ap) for ap in active_pages)
+                if page_indicates_no_cadastro(all_text):
+                    browser.close()
+                    return {"status": "sem_cadastro", "message": "Não foi possível carregar os dados do cadastro."}
+
+                # 1) PDF capturado pela rede antes mesmo de aparecer o blob.
+                if network_pdfs:
+                    url, body = network_pdfs[-1]
                     browser.close()
                     return {
                         "status": "processado",
-                        "pdf_bytes": pdf_bytes,
-                        "pdf_url": download.url,
-                        "capture_method": f"playwright_download:{download_selector}",
+                        "pdf_bytes": body,
+                        "pdf_url": url,
+                        "capture_method": f"playwright_network:{print_selector}",
                     }
-            except Exception:
-                pass
 
-        # Última tentativa: procurar blob novamente após clicar em baixar.
-        try:
-            if download_locator:
-                download_locator.click(timeout=timeout_ms)
-                active_page.wait_for_timeout(1500)
-                pdf_bytes, pdf_blob_url = _extract_blob_from_page(active_page)
+                # 2) Blob já disponível em qualquer frame/página.
+                pdf_bytes, pdf_blob_url = _extract_any_blob(context, page, popup)
                 if pdf_bytes and pdf_bytes.startswith(b"%PDF"):
                     browser.close()
                     return {
                         "status": "processado",
                         "pdf_bytes": pdf_bytes,
-                        "pdf_url": pdf_blob_url or active_page.url,
-                        "capture_method": f"playwright_blob_after_download:{download_selector}",
+                        "pdf_url": pdf_blob_url or (popup.url if popup else page.url),
+                        "capture_method": f"playwright_blob:{print_selector}",
                     }
-        except Exception:
-            pass
+
+                # 3) Procurar botão Baixar em qualquer frame/modal/popup.
+                found_pg, found_frame, download_locator, download_selector = _first_visible_in_frames(context, page, popup, DOWNLOAD_SELECTORS)
+                if download_locator:
+                    try:
+                        with found_pg.expect_download(timeout=timeout_ms) as download_info:
+                            ok = _click_best_effort(download_locator, timeout_ms)
+                            if not ok:
+                                raise RuntimeError('Falha ao clicar no botão Baixar')
+                        download = download_info.value
+                        tmp_path = download.path()
+                        if tmp_path and os.path.exists(tmp_path):
+                            with open(tmp_path, "rb") as f:
+                                pdf_bytes = f.read()
+                            browser.close()
+                            return {
+                                "status": "processado",
+                                "pdf_bytes": pdf_bytes,
+                                "pdf_url": download.url,
+                                "capture_method": f"playwright_download:{download_selector}",
+                            }
+                    except Exception:
+                        # após o clique, tentar blob e rede novamente
+                        try:
+                            found_pg.wait_for_timeout(1800)
+                        except Exception:
+                            pass
+
+                    if network_pdfs:
+                        url, body = network_pdfs[-1]
+                        browser.close()
+                        return {
+                            "status": "processado",
+                            "pdf_bytes": body,
+                            "pdf_url": url,
+                            "capture_method": f"playwright_network_after_download:{download_selector}",
+                        }
+
+                    pdf_bytes, pdf_blob_url = _extract_any_blob(context, page, popup)
+                    if pdf_bytes and pdf_bytes.startswith(b"%PDF"):
+                        browser.close()
+                        return {
+                            "status": "processado",
+                            "pdf_bytes": pdf_bytes,
+                            "pdf_url": pdf_blob_url or (popup.url if popup else page.url),
+                            "capture_method": f"playwright_blob_after_download:{download_selector}",
+                        }
+
+                last_error = f"Cliquei em {print_selector}, mas não achei PDF nem botão Baixar utilizável."
+            except Exception as exc:
+                last_error = str(exc)
+                continue
 
         browser.close()
-        raise RuntimeError("PDF não encontrado nem capturado após clicar em imprimir/baixar.")
+        raise RuntimeError(last_error or "PDF não encontrado após clicar em imprimir/baixar.")
 
 
 def process_sequence_id(sequence_id: int):
