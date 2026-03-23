@@ -30,3 +30,6 @@ aptPkgs = [
 
 [phases.build]
 cmds = ["python -m playwright install chromium"]
+
+[start]
+cmd = "sh -c 'gunicorn run:app --bind 0.0.0.0:${PORT:-8080}'"
