@@ -12,10 +12,10 @@ def _get_database_uri(data_dir: str) -> str:
     if not database_url:
         return default_sqlite
 
-if database_url.startswith("postgres://"):
-    database_url = database_url.replace("postgres://", "postgresql://", 1)
-elif database_url.startswith("postgresql+psycopg://"):
-    database_url = database_url.replace("postgresql+psycopg://", "postgresql://", 1)
+    if database_url.startswith("postgres://"):
+        database_url = database_url.replace("postgres://", "postgresql+psycopg://", 1)
+    elif database_url.startswith("postgresql://") and not database_url.startswith("postgresql+"):
+        database_url = database_url.replace("postgresql://", "postgresql+psycopg://", 1)
 
     return database_url
 
