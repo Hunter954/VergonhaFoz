@@ -34,6 +34,10 @@ def create_app():
     app.config["SCAN_INTERVAL_MINUTES"] = int(os.getenv("SCAN_INTERVAL_MINUTES", "30"))
     app.config["CRAWL_MAX_DEPTH"] = int(os.getenv("CRAWL_MAX_DEPTH", "2"))
     app.config["CRAWL_TIMEOUT_SECONDS"] = int(os.getenv("CRAWL_TIMEOUT_SECONDS", "25"))
+    app.config["PLAYWRIGHT_ENABLED"] = os.getenv("PLAYWRIGHT_ENABLED", "true").lower() == "true"
+    app.config["PLAYWRIGHT_HEADLESS"] = os.getenv("PLAYWRIGHT_HEADLESS", "true").lower() == "true"
+    app.config["PLAYWRIGHT_TIMEOUT_MS"] = int(os.getenv("PLAYWRIGHT_TIMEOUT_MS", "30000"))
+    app.config["PLAYWRIGHT_WAIT_AFTER_PRINT_MS"] = int(os.getenv("PLAYWRIGHT_WAIT_AFTER_PRINT_MS", "2500"))
     app.config["USER_AGENT"] = os.getenv(
         "USER_AGENT",
         "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123 Safari/537.36",

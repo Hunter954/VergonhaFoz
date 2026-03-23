@@ -1,7 +1,9 @@
+import base64
 import hashlib
 import json
 import os
 import re
+import time
 from collections import deque
 from datetime import datetime
 from urllib.parse import urljoin, urlparse
@@ -13,6 +15,15 @@ from flask import current_app
 from .extensions import db
 from .models import PropertyRecord, PropertyScan, SourcePdf
 from .pdf_parser import parse_property_pdf
+
+try:
+    from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
+    from playwright.sync_api import sync_playwright
+    PLAYWRIGHT_AVAILABLE = True
+except Exception:
+    sync_playwright = None
+    PlaywrightTimeoutError = Exception
+    PLAYWRIGHT_AVAILABLE = False
 
 
 PDF_PATTERNS = [
@@ -27,9 +38,33 @@ NO_CADASTRO_PATTERNS = [
     re.compile(r"im[oó]vel\s+n[aã]o\s+encontrado", re.IGNORECASE),
 ]
 
+PRINT_SELECTORS = [
+    "i.fa-print",
+    "i.fas.fa-print",
+    "[title*='imprim' i]",
+    "button[title*='imprim' i]",
+    "a[title*='imprim' i]",
+    "text=Imprimir",
+]
+
+DOWNLOAD_SELECTORS = [
+    "text=Baixar",
+    "a:has-text('Baixar')",
+    "button:has-text('Baixar')",
+    "[download]",
+    "a[href^='blob:']",
+    "iframe[src^='blob:']",
+    "embed[src^='blob:']",
+]
+
 
 def _headers(referer=None):
-    headers = {"User-Agent": current_app.config["USER_AGENT"]}
+    headers = {
+        "User-Agent": current_app.config["USER_AGENT"],
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
+        "Accept-Language": "pt-BR,pt;q=0.9,en-US;q=0.8,en;q=0.7",
+        "Connection": "keep-alive",
+    }
     if referer:
         headers["Referer"] = referer
     return headers
@@ -141,6 +176,33 @@ def fetch_target_page(url: str):
     }
 
 
+def save_pdf_bytes(content: bytes, source_url: str, referer_url: str | None = None, status: str = "baixado"):
+    digest = sha256_of_bytes(content)
+    existing = SourcePdf.query.filter_by(sha256=digest).first()
+    if existing:
+        if referer_url and not existing.page_url:
+            existing.page_url = referer_url
+            db.session.commit()
+        return existing, False
+
+    filename = f"{digest}.pdf"
+    file_path = os.path.join(current_app.config["PDF_STORAGE_DIR"], filename)
+    with open(file_path, "wb") as f:
+        f.write(content)
+
+    source = SourcePdf(
+        source_url=source_url,
+        page_url=referer_url,
+        file_path=file_path,
+        sha256=digest,
+        file_size=len(content),
+        status=status,
+    )
+    db.session.add(source)
+    db.session.commit()
+    return source, True
+
+
 def download_pdf(source_url: str, referer_url: str | None = None):
     timeout = current_app.config["CRAWL_TIMEOUT_SECONDS"]
     response = requests.get(source_url, headers=_headers(referer_url), timeout=timeout)
@@ -150,27 +212,7 @@ def download_pdf(source_url: str, referer_url: str | None = None):
     if "application/pdf" not in content_type and not response.content.startswith(b"%PDF"):
         raise ValueError(f"URL retornou conteúdo não-PDF: {content_type}")
 
-    digest = sha256_of_bytes(response.content)
-    existing = SourcePdf.query.filter_by(sha256=digest).first()
-    if existing:
-        return existing, False
-
-    filename = f"{digest}.pdf"
-    file_path = os.path.join(current_app.config["PDF_STORAGE_DIR"], filename)
-    with open(file_path, "wb") as f:
-        f.write(response.content)
-
-    source = SourcePdf(
-        source_url=source_url,
-        page_url=referer_url,
-        file_path=file_path,
-        sha256=digest,
-        file_size=len(response.content),
-        status="baixado",
-    )
-    db.session.add(source)
-    db.session.commit()
-    return source, True
+    return save_pdf_bytes(response.content, source_url=source_url, referer_url=referer_url)
 
 
 def process_pdf(source: SourcePdf):
@@ -209,6 +251,182 @@ def update_scan(scan: PropertyScan, **kwargs):
     return scan
 
 
+def _page_text(page) -> str:
+    try:
+        return normalize_text(page.locator("body").inner_text(timeout=4000))
+    except Exception:
+        try:
+            return normalize_text(page.content())
+        except Exception:
+            return ""
+
+
+def _find_first(page, selectors):
+    for selector in selectors:
+        try:
+            locator = page.locator(selector).first
+            if locator.count() > 0 and locator.is_visible(timeout=1000):
+                return locator, selector
+        except Exception:
+            continue
+    return None, None
+
+
+def _extract_blob_from_page(page):
+    try:
+        current_url = page.url or ""
+        if current_url.startswith("blob:"):
+            b64 = page.evaluate(
+                """async () => {
+                    const res = await fetch(window.location.href);
+                    const buf = await res.arrayBuffer();
+                    let binary = '';
+                    const bytes = new Uint8Array(buf);
+                    const chunk = 0x8000;
+                    for (let i = 0; i < bytes.length; i += chunk) {
+                      binary += String.fromCharCode(...bytes.subarray(i, i + chunk));
+                    }
+                    return btoa(binary);
+                }"""
+            )
+            return base64.b64decode(b64), current_url
+    except Exception:
+        pass
+
+    js = """async () => {
+        const candidates = [];
+        const pushIfBlob = (v) => { if (v && typeof v === 'string' && v.startsWith('blob:')) candidates.push(v); };
+        document.querySelectorAll('a, iframe, embed, object').forEach(el => {
+          pushIfBlob(el.href);
+          pushIfBlob(el.src);
+          pushIfBlob(el.data);
+        });
+        if (!candidates.length) return null;
+        const res = await fetch(candidates[0]);
+        const buf = await res.arrayBuffer();
+        let binary = '';
+        const bytes = new Uint8Array(buf);
+        const chunk = 0x8000;
+        for (let i = 0; i < bytes.length; i += chunk) {
+          binary += String.fromCharCode(...bytes.subarray(i, i + chunk));
+        }
+        return { url: candidates[0], b64: btoa(binary) };
+    }"""
+    try:
+        result = page.evaluate(js)
+        if result and result.get("b64"):
+            return base64.b64decode(result["b64"]), result.get("url")
+    except Exception:
+        pass
+    return None, None
+
+
+def _capture_pdf_via_playwright(target_url: str):
+    if not PLAYWRIGHT_AVAILABLE:
+        raise RuntimeError("Playwright não está instalado na aplicação.")
+
+    timeout_ms = current_app.config["PLAYWRIGHT_TIMEOUT_MS"]
+    wait_after_print_ms = current_app.config["PLAYWRIGHT_WAIT_AFTER_PRINT_MS"]
+    use_headless = current_app.config["PLAYWRIGHT_HEADLESS"]
+
+    with sync_playwright() as p:
+        browser = p.chromium.launch(
+            headless=use_headless,
+            args=["--no-sandbox", "--disable-dev-shm-usage", "--disable-gpu"],
+        )
+        context = browser.new_context(
+            accept_downloads=True,
+            user_agent=current_app.config["USER_AGENT"],
+            locale="pt-BR",
+            viewport={"width": 1440, "height": 1100},
+        )
+        page = context.new_page()
+        page.goto(target_url, wait_until="domcontentloaded", timeout=timeout_ms)
+        page.wait_for_load_state("networkidle", timeout=timeout_ms)
+
+        body_text = _page_text(page)
+        if page_indicates_no_cadastro(body_text):
+            browser.close()
+            return {"status": "sem_cadastro", "message": "Não foi possível carregar os dados do cadastro."}
+
+        print_locator, print_selector = _find_first(page, PRINT_SELECTORS)
+        if not print_locator:
+            browser.close()
+            raise RuntimeError("Ícone/botão de impressão não encontrado na página.")
+
+        popup = None
+        try:
+            with context.expect_page(timeout=3000) as popup_info:
+                print_locator.click(timeout=timeout_ms)
+            popup = popup_info.value
+            popup.wait_for_load_state("domcontentloaded", timeout=timeout_ms)
+        except Exception:
+            print_locator.click(timeout=timeout_ms)
+            page.wait_for_timeout(wait_after_print_ms)
+
+        active_page = popup or page
+        try:
+            active_page.wait_for_load_state("networkidle", timeout=min(timeout_ms, 10000))
+        except Exception:
+            pass
+        active_page.wait_for_timeout(wait_after_print_ms)
+
+        no_cadastro_text = _page_text(active_page)
+        if page_indicates_no_cadastro(no_cadastro_text):
+            browser.close()
+            return {"status": "sem_cadastro", "message": "Não foi possível carregar os dados do cadastro."}
+
+        pdf_bytes, pdf_blob_url = _extract_blob_from_page(active_page)
+        if pdf_bytes and pdf_bytes.startswith(b"%PDF"):
+            browser.close()
+            return {
+                "status": "processado",
+                "pdf_bytes": pdf_bytes,
+                "pdf_url": pdf_blob_url or active_page.url,
+                "capture_method": f"playwright_blob:{print_selector}",
+            }
+
+        download_locator, download_selector = _find_first(active_page, DOWNLOAD_SELECTORS)
+        if download_locator:
+            try:
+                with active_page.expect_download(timeout=timeout_ms) as download_info:
+                    download_locator.click(timeout=timeout_ms)
+                download = download_info.value
+                tmp_path = download.path()
+                if tmp_path and os.path.exists(tmp_path):
+                    with open(tmp_path, "rb") as f:
+                        pdf_bytes = f.read()
+                    browser.close()
+                    return {
+                        "status": "processado",
+                        "pdf_bytes": pdf_bytes,
+                        "pdf_url": download.url,
+                        "capture_method": f"playwright_download:{download_selector}",
+                    }
+            except Exception:
+                pass
+
+        # Última tentativa: procurar blob novamente após clicar em baixar.
+        try:
+            if download_locator:
+                download_locator.click(timeout=timeout_ms)
+                active_page.wait_for_timeout(1500)
+                pdf_bytes, pdf_blob_url = _extract_blob_from_page(active_page)
+                if pdf_bytes and pdf_bytes.startswith(b"%PDF"):
+                    browser.close()
+                    return {
+                        "status": "processado",
+                        "pdf_bytes": pdf_bytes,
+                        "pdf_url": pdf_blob_url or active_page.url,
+                        "capture_method": f"playwright_blob_after_download:{download_selector}",
+                    }
+        except Exception:
+            pass
+
+        browser.close()
+        raise RuntimeError("PDF não encontrado nem capturado após clicar em imprimir/baixar.")
+
+
 def process_sequence_id(sequence_id: int):
     target_url = current_app.config["SEQUENTIAL_URL_TEMPLATE"].format(id=sequence_id)
     scan = get_or_create_scan(sequence_id, target_url)
@@ -231,30 +449,60 @@ def process_sequence_id(sequence_id: int):
             return {"sequence_id": sequence_id, "status": "sem_cadastro"}
 
         links = discover_pdf_links_in_html(target_url, page["html"], max_depth=1)
-        if not links:
+        if links:
+            pdf_url, referer = links[0]
+            source, _created = download_pdf(pdf_url, referer)
+            scan.pdf_url = pdf_url
+            scan.source_pdf_id = source.id
+            source.property_scan = scan
+            db.session.commit()
+
+            process_pdf(source)
             update_scan(
                 scan,
-                status="pdf_nao_encontrado",
+                status="processado",
                 no_cadastro_detected=False,
-                error_message="Página carregou, mas nenhum PDF foi localizado.",
+                error_message=None,
             )
-            return {"sequence_id": sequence_id, "status": "pdf_nao_encontrado"}
+            return {"sequence_id": sequence_id, "status": "processado", "pdf_url": pdf_url, "method": "requests"}
 
-        pdf_url, referer = links[0]
-        source, _created = download_pdf(pdf_url, referer)
-        scan.pdf_url = pdf_url
-        scan.source_pdf_id = source.id
-        source.property_scan = scan
-        db.session.commit()
+        if current_app.config.get("PLAYWRIGHT_ENABLED", True):
+            pw = _capture_pdf_via_playwright(target_url)
+            if pw["status"] == "sem_cadastro":
+                update_scan(
+                    scan,
+                    status="sem_cadastro",
+                    no_cadastro_detected=True,
+                    error_message=pw.get("message") or "Não foi possível carregar os dados do cadastro.",
+                )
+                return {"sequence_id": sequence_id, "status": "sem_cadastro", "method": "playwright"}
 
-        process_pdf(source)
+            source, _created = save_pdf_bytes(
+                pw["pdf_bytes"],
+                source_url=pw.get("pdf_url") or f"blob:{sequence_id}",
+                referer_url=target_url,
+                status="baixado",
+            )
+            scan.pdf_url = pw.get("pdf_url")
+            scan.source_pdf_id = source.id
+            source.property_scan = scan
+            db.session.commit()
+            process_pdf(source)
+            update_scan(scan, status="processado", no_cadastro_detected=False, error_message=None)
+            return {
+                "sequence_id": sequence_id,
+                "status": "processado",
+                "pdf_url": pw.get("pdf_url"),
+                "method": pw.get("capture_method", "playwright"),
+            }
+
         update_scan(
             scan,
-            status="processado",
+            status="pdf_nao_encontrado",
             no_cadastro_detected=False,
-            error_message=None,
+            error_message="Página carregou, mas nenhum PDF foi localizado.",
         )
-        return {"sequence_id": sequence_id, "status": "processado", "pdf_url": pdf_url}
+        return {"sequence_id": sequence_id, "status": "pdf_nao_encontrado"}
     except Exception as exc:
         update_scan(scan, status="erro", error_message=str(exc))
         return {"sequence_id": sequence_id, "status": "erro", "error": str(exc)}
